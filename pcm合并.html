@@ -35,7 +35,7 @@
     };
 
     // 合并变量
-    const CHUNK_BATCH_SIZE = 500; // 每5个块合并一次
+    const CHUNK_BATCH_SIZE = 5; // 每5个块合并一次
     let tempChunkCache = new Map(); // 临时缓存：key=块序号，value=PCM ArrayBuffer
     let mergedBufferArray = []; // 最终存储合并后缓冲区的数组
     let totalReceivedChunks = 1; // 已接收的总块数
@@ -273,7 +273,7 @@
         /** 方案二 */
         // 解码WAV数据  https://developer.mozilla.org/zh-CN/docs/Web/API/BaseAudioContext/decodeAudioData
         const audioBuffer = await audioContextRef.decodeAudioData(arrayBuffer);
-        console.log(audioBuffer);
+        // console.log(audioBuffer);
         // 创建音源并播放 https://developer.mozilla.org/zh-CN/docs/Web/API/BaseAudioContext/createBufferSource
         const source = audioContextRef.createBufferSource();
 
@@ -328,7 +328,7 @@
         offset += arr.length; // 更新下一个分块的起始位置
       }
       // console.log(mergedArray);
-      console.log(`已合并${sortedChunks.length}个块`);
+      // console.log(`已合并${sortedChunks.length}个块`);
 
       // 4. 清空临时缓存，继续累计下一批块
       tempChunkCache.clear();
@@ -371,7 +371,7 @@
         // 计算与上一次消息的时间差
         if (lastMessageTime !== null) {
           messageInterval = (currentTime - lastMessageTime) / 1000; // 转换为秒
-          // console.log(`距离上次消息间隔: ${messageInterval.toFixed(3)} 秒`);
+          console.log(`距离上次消息间隔: ${messageInterval.toFixed(3)} 秒`);
         } else {
           // console.log("第一条消息接收");
         }
@@ -422,7 +422,7 @@
         if (!tempChunkCache.has(chunkId)) {
           tempChunkCache.set(chunkId, pcmUint8);
           totalReceivedChunks++;
-          console.log(`已接收第${chunkId}块，累计${totalReceivedChunks}块`);
+          //  console.log(`已接收第${chunkId}块，累计${totalReceivedChunks}块`);
         }
         // 3. 检查是否达到批量合并阈值（每5个块）
         if (tempChunkCache.size >= CHUNK_BATCH_SIZE) {

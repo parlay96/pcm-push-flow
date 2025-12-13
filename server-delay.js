@@ -53,7 +53,7 @@ async function streamPcmBysse(res) {
   let delayTime = 0;
   fileStream.on("data", (chunk) => {
     // 每块延迟+1000ms，下一块的延迟是 1000/2000/3000...ms
-    delayTime += 1000;
+    delayTime += 200;
     // 每新增一个延迟任务，计数器+1
     pendingTasks++;
     try {
