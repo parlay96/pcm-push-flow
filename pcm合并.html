@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pcm推流播放</title>
+  </head>
+  <body>
+    <h1>pcm推流播放</h1>
+  </body>
+
+  <script>
+    // 在全局变量区域添加时间记录变量
+    let lastMessageTime = null;
+    let messageInterval = null;
+    // sse
+    let eventSourceRef = null;
+
+    // 音频上下文实例
+    let audioContextRef = null;
+    // 音频数据队列
+    let audioQueueRef = [];
+    // 是否在播放
+    let isPlayingRef = false;
+    // 音频源节点
+    let sourceNodeRef = null;
+    // 添加索引计数器
+    let currentIndexRef = 0;
+
+    // 音频配置
+    let audioConfigRef = {
+      sampleRate: 16000,
+      bitDepth: 16,
+      channels: 1,
+    };
+
+    // 合并变量
+    const CHUNK_BATCH_SIZE = 500; // 每5个块合并一次
+    let tempChunkCache = new Map(); // 临时缓存：key=块序号，value=PCM ArrayBuffer
+    let mergedBufferArray = []; // 最终存储合并后缓冲区的数组
+    let totalReceivedChunks = 1; // 已接收的总块数
+    /**
+     * 核心：PCM转WAV（复用之前的核心函数，适配ArrayBuffer入参）
+     * @param pcmBuffer PCM格式的ArrayBuffer（纯有效数据）
+     * @param options 音频参数（必须匹配PCM实际参数）
+     * @returns WAV格式的ArrayBuffer
+     */
+    function pcmToWav(pcmBuffer, options) {
+      const { sampleRate = 16000, bitDepth = 16, channels = 1 } = options;
+      const pcmLength = pcmBuffer.byteLength;
+      const wavHeaderLength = 44;
+      const wavLength = wavHeaderLength + pcmLength;
+
+      // 创建WAV缓冲区（头+PCM数据）
+      const wavBuffer = new ArrayBuffer(wavLength);
+      const view = new DataView(wavBuffer);
+      // 1. 写入WAV文件头（RIFF标准格式）
+      // ChunkID: "RIFF"
+      view.setUint8(0, 0x52);
+      view.setUint8(1, 0x49);
+      view.setUint8(2, 0x46);
+      view.setUint8(3, 0x46);
+      // ChunkSize: 总长度 - 8
+      view.setUint32(4, wavLength - 8, true);
+      // Format: "WAVE"
+      view.setUint8(8, 0x57);
+      view.setUint8(9, 0x41);
+      view.setUint8(10, 0x56);
+      view.setUint8(11, 0x45);
+      // Subchunk1ID: "fmt "
+      view.setUint8(12, 0x66);
+      view.setUint8(13, 0x6d);
+      view.setUint8(14, 0x74);
+      view.setUint8(15, 0x20);
+      // Subchunk1Size: 16（PCM固定）
+      view.setUint32(16, 16, true);
+      // AudioFormat: 1（PCM格式）
+      view.setUint16(20, 1, true);
+      // NumChannels: 声道数
+      view.setUint16(22, channels, true);
+      // SampleRate: 采样率
+      view.setUint32(24, sampleRate, true);
+      // ByteRate: 采样率×声道数×位深/8
+      view.setUint32(28, sampleRate * channels * (bitDepth / 8), true);
+      // BlockAlign: 声道数×位深/8
+      view.setUint16(32, channels * (bitDepth / 8), true);
+      // BitsPerSample: 位深
+      view.setUint16(34, bitDepth, true);
+      // Subchunk2ID: "data"
+      view.setUint8(36, 0x64);
+      view.setUint8(37, 0x61);
+      view.setUint8(38, 0x74);
+      view.setUint8(39, 0x61);
+      // Subchunk2Size: PCM数据长度
+      view.setUint32(40, pcmLength, true);
+
+      // 2. 写入PCM数据（从44字节开始）
+      const pcmView = new Uint8Array(pcmBuffer);
+      const wavView = new Uint8Array(wavBuffer);
+      wavView.set(pcmView, wavHeaderLength);
+
+      // const wavHeaderSampleRate = view.getUint32(24, true)
+      // console.log('WAV 头采样率：', wavHeaderSampleRate, options) // 必须输出 16000
+
+      return wavBuffer;
+    }
+
+    // Base64编码的字符串转换为Uint8Array(二进制数据)
+    const base64ToUint8Array = function (base64) {
+      if (!base64) return null;
+      try {
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const uint8Array = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          uint8Array[i] = binaryString.charCodeAt(i);
+        }
+        return uint8Array;
+      } catch (error) {
+        return null;
+      }
+    };
+
+    // 添加MP3到WAV的转换函数
+    async function mp3ToWav(mp3ArrayBuffer) {
+      // 辅助函数：向DataView写入字符串
+      function writeString(view, offset, string) {
+        for (let i = 0; i < string.length; i++) {
+          view.setUint8(offset + i, string.charCodeAt(i));
+        }
+      }
+
+      try {
+        // 确保音频上下文已经初始化
+        if (!audioContextRef) {
+          audioContextRef = new (window.AudioContext ||
+            window.webkitAudioContext)();
+        }
+
+        // 第一步：解码MP3数据为AudioBuffer
+        const audioBuffer = await audioContextRef.decodeAudioData(
+          mp3ArrayBuffer
+        );
+
+        // 获取音频参数
+        const sampleRate = audioBuffer.sampleRate;
+        const channels = audioBuffer.numberOfChannels;
+        const length = audioBuffer.length;
+        const bitDepth = 16; // WAV通常使用16位深度
+
+        // 计算WAV文件大小
+        const wavHeaderLength = 44;
+        const pcmDataLength = length * channels * (bitDepth / 8);
+        const wavLength = wavHeaderLength + pcmDataLength;
+
+        // 创建WAV缓冲区
+        const wavBuffer = new ArrayBuffer(wavLength);
+        const view = new DataView(wavBuffer);
+
+        // 写入WAV文件头(RIFF格式)
+        // RIFF chunk descriptor
+        writeString(view, 0, "RIFF");
+        view.setUint32(4, wavLength - 8, true);
+        writeString(view, 8, "WAVE");
+
+        // fmt sub-chunk
+        writeString(view, 12, "fmt ");
+        view.setUint32(16, 16, true); // Subchunk1Size (PCM = 16)
+        view.setUint16(20, 1, true); // AudioFormat (PCM = 1)
+        view.setUint16(22, channels, true); // NumChannels
+        view.setUint32(24, sampleRate, true); // SampleRate
+        view.setUint32(28, (sampleRate * channels * bitDepth) / 8, true); // ByteRate
+        view.setUint16(32, (channels * bitDepth) / 8, true); // BlockAlign
+        view.setUint16(34, bitDepth, true); // BitsPerSample
+
+        // data sub-chunk
+        writeString(view, 36, "data");
+        view.setUint32(40, pcmDataLength, true);
+
+        // 写入PCM数据
+        let offset = wavHeaderLength;
+        const channelData = [];
+
+        // 获取每个声道的数据
+        for (let i = 0; i < channels; i++) {
+          channelData.push(audioBuffer.getChannelData(i));
+        }
+
+        // 交错声道数据并转换为16位整数
+        for (let i = 0; i < length; i++) {
+          for (let ch = 0; ch < channels; ch++) {
+            // 将浮点数(-1.0 到 1.0)转换为16位整数
+            let sample = Math.max(-1, Math.min(1, channelData[ch][i]));
+            sample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+            view.setInt16(offset, sample, true);
+            offset += 2;
+          }
+        }
+
+        return wavBuffer;
+      } catch (error) {
+        console.error("MP3转WAV失败:", error);
+        return null;
+      }
+    }
+
+    // 添加音频数据到队列
+    const addToAudioQueue = async function (uint8Array) {
+      // pcm转换为ArrayBuffer
+      const arrayBuffer = uint8Array.buffer.slice(
+        uint8Array.byteOffset,
+        uint8Array.byteOffset + uint8Array.byteLength
+      );
+      // pcm转wav
+      const _buffer = pcmToWav(arrayBuffer, {
+        ...audioConfigRef,
+      });
+
+      // 转成mp3Buffer
+      // const _buffer = uint8Array.buffer.slice(
+      //   uint8Array.byteOffset,
+      //   uint8Array.byteOffset + uint8Array.byteLength
+      // );
+
+      // 将MP3转换为WAV
+      // const _buffer = await mp3ToWav(mp3Buffer);
+      // console.log(_buffer);
+
+      // 添加到播放队列
+      audioQueueRef.push(_buffer);
+      // // 如果没有在播放，则开始播放
+      if (!isPlayingRef && audioQueueRef.length > 0) {
+        playAudioQueue();
+      }
+    };
+
+    // 播放音频队列
+    const playAudioQueue = async function () {
+      if (!audioContextRef || isPlayingRef || audioQueueRef.length === 0) {
+        return;
+      }
+
+      isPlayingRef = true;
+
+      // 获取队列中的第一个音频块
+      const arrayBuffer = audioQueueRef.shift();
+      if (!arrayBuffer) {
+        isPlayingRef = false;
+        return;
+      }
+
+      try {
+        // 增加索引计数器
+        currentIndexRef++;
+
+        if (!arrayBuffer) return;
+        /**
+         * 方案一
+         */
+        // 3. 生成WAV的Blob URL，供audio标签播放
+        //  const wavBlob = new Blob([arrayBuffer], { type: 'audio/wav' });
+        //  const wavUrl = URL.createObjectURL(wavBlob);
+
+        // 4. 播放
+        //  const audioPlayer = document.getElementById('audioPlayer');
+        //  audioPlayer.src = wavUrl;
+        //  audioPlayer.play();
+
+        //  // 播放结束后释放Blob URL（避免内存泄漏）
+        //  audioPlayer.onended = () => {
+        //      URL.revokeObjectURL(wavUrl);
+        //  };
+        /** 方案二 */
+        // 解码WAV数据  https://developer.mozilla.org/zh-CN/docs/Web/API/BaseAudioContext/decodeAudioData
+        const audioBuffer = await audioContextRef.decodeAudioData(arrayBuffer);
+        console.log(audioBuffer);
+        // 创建音源并播放 https://developer.mozilla.org/zh-CN/docs/Web/API/BaseAudioContext/createBufferSource
+        const source = audioContextRef.createBufferSource();
+
+        source.buffer = audioBuffer;
+        // ADD
+        sourceNodeRef = source;
+        // https://developer.mozilla.org/zh-CN/docs/Web/API/AudioNode/connect
+        source.connect(audioContextRef.destination);
+
+        source.start();
+        /**
+         * 播放完成后继续播放队列中的下一个
+         * onended: https://developer.mozilla.org/zh-CN/docs/Web/API/AudioBufferSourceNode#%E4%BA%8B%E4%BB%B6
+         */
+        source.onended = () => {
+          console.log("播放完毕----------", currentIndexRef);
+          isPlayingRef = false;
+          sourceNodeRef = null;
+          // 继续播放队列中的其他音频块
+          if (audioQueueRef.length > 0) {
+            playAudioQueue();
+          }
+        };
+      } catch (error) {
+        console.error("音频播放失败:", error);
+        isPlayingRef = false;
+      }
+    };
+
+    // 把多个块合并为1个块
+    function mergeUint8Arrays(uint8Arrays) {
+      // 按块序号排序（关键：避免SSE乱序导致音频错乱, 提取PCM ArrayBuffer
+      const sortedChunks = Array.from(uint8Arrays.entries())
+        .sort((a, b) => a[0] - b[0]) // 按chunkId升序
+        .map((item) => {
+          return item[1];
+        });
+
+      // 1. 计算所有分块的总字节长度（和之前合并 ArrayBuffer 逻辑一致）
+      const totalLength = sortedChunks.reduce(
+        (sum, arr) => sum + arr.length,
+        0
+      );
+
+      // 2. 创建一个总长度的新 Uint8Array
+      const mergedArray = new Uint8Array(totalLength);
+
+      // 3. 按顺序拷贝每个分块
+      let offset = 0; // 记录当前拷贝的起始位置
+      for (const arr of sortedChunks) {
+        mergedArray.set(arr, offset); // 将当前分块拷贝到 offset 位置
+        offset += arr.length; // 更新下一个分块的起始位置
+      }
+      // console.log(mergedArray);
+      console.log(`已合并${sortedChunks.length}个块`);
+
+      // 4. 清空临时缓存，继续累计下一批块
+      tempChunkCache.clear();
+
+      // 播放列队
+      if (mergedArray) {
+        if (!audioContextRef) {
+          // 初始化音频上下文
+          audioContextRef = new (window.AudioContext ||
+            window.webkitAudioContext)({
+            sampleRate: audioConfigRef.sampleRate,
+          });
+        }
+        // 添加到音频队列并播放
+        addToAudioQueue(mergedArray);
+      }
+    }
+    // 页面所有资源加载完成
+    window.addEventListener("load", function () {
+      // 初始化SSE连接
+      const url1 = "http://localhost:3000/api/pcm-stream";
+      const url2 =
+        "https://ai-api-test.deepcity.cn/square/api.chat/sendVoiceOpen?msgId=845f43ea20b50488793601a40b37abd7&chatScene=zhanhui&sceneValue=89dbf3b3b91f4b698308272f0a7bddda";
+      eventSourceRef = new EventSource(url1);
+      // 监听SSE消息
+      eventSourceRef.onopen = () => {
+        console.log("已连接SSE，等待PCM数据...");
+      };
+
+      eventSourceRef.onmessage = (e) => {
+        // 记录当前消息到达的时间
+        const currentTime = Date.now();
+        let data = null;
+        try {
+          data = JSON.parse(e.data);
+        } catch (error) {
+          // console.error("解析SSE消息时出错：", error);
+        }
+        // console.log(data);
+        // 计算与上一次消息的时间差
+        if (lastMessageTime !== null) {
+          messageInterval = (currentTime - lastMessageTime) / 1000; // 转换为秒
+          // console.log(`距离上次消息间隔: ${messageInterval.toFixed(3)} 秒`);
+        } else {
+          // console.log("第一条消息接收");
+        }
+        // 更新上次消息时间
+        lastMessageTime = currentTime;
+
+        // 处理结束标识
+        if (data.type === "end") {
+          console.log(`推送完成，总块数：${data.total}`);
+          console.log(tempChunkCache.size);
+          // 处理传输结束后不满足5个的块的部分需要再次合并
+          if (tempChunkCache.size) {
+            mergeUint8Arrays(tempChunkCache);
+          }
+          eventSourceRef.close();
+          return;
+        }
+
+        // 处理错误
+        if (data.type === "error") {
+          console.log(`错误：${data.message}`);
+          eventSourceRef.close();
+          return;
+        }
+
+        // Base64 解码为 Uint8Array（PCM 二进制）
+        const _base64 = data.data?.audio || data.data;
+
+        if (!_base64) return;
+
+        // 更新音频配置（如果存在）
+        if (data?.config) {
+          audioConfigRef = {
+            sampleRate: data.config?.sampleRate,
+            bitDepth: data.config?.bitDepth,
+            channels: data.config?.channels,
+          };
+        }
+
+        // pcm 二进制数据
+        const pcmUint8 = base64ToUint8Array(_base64);
+        // console.log(pcmUint8);
+        // 1. Base64转Uint8Array（MP3二进制）
+        //  const mp3Uint8 = base64ToUint8Array(_base64);
+        // 2. 存入临时缓存（去重+保序）
+        if (!pcmUint8) return;
+        const chunkId = data.id;
+        if (!tempChunkCache.has(chunkId)) {
+          tempChunkCache.set(chunkId, pcmUint8);
+          totalReceivedChunks++;
+          console.log(`已接收第${chunkId}块，累计${totalReceivedChunks}块`);
+        }
+        // 3. 检查是否达到批量合并阈值（每5个块）
+        if (tempChunkCache.size >= CHUNK_BATCH_SIZE) {
+          mergeUint8Arrays(tempChunkCache);
+        }
+      };
+
+      eventSourceRef.onerror = (err) => {
+        console.log(`SSE连接错误：${err.message}`);
+        eventSourceRef.close();
+      };
+    });
+  </script>
+</html>
