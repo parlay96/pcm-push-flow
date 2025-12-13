@@ -24,28 +24,26 @@ const CONFIG = {
 // CONFIG.pushInterval = (CONFIG.chunkSize / ((CONFIG.bitDepth / 8) * CONFIG.channels) / CONFIG.sampleRate) * 1000
 
 async function streamPcmBysse(res) {
-  // 1. 验证PCM文件存在
   if (!fs.existsSync(CONFIG.pcmFilePath)) {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end(`PCM文件不存在：${CONFIG.pcmFilePath}`);
     return;
   }
 
-  // 2. 设置SSE响应头（核心）
   res.writeHead(200, {
-    "Content-Type": "text/event-stream", // SSE专属Content-Type
-    "Cache-Control": "no-cache", // 禁用缓存
-    Connection: "keep-alive", // 长连接
-    "Access-Control-Allow-Origin": "*", // 跨域支持（根据需求调整）
+    // SSE专属Content-Type
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
   });
 
-  // 3. 创建文件读取流
   const fileStream = fs.createReadStream(CONFIG.pcmFilePath, {
-    highWaterMark: CONFIG.chunkSize, // 每次读取chunkSize字节
+    highWaterMark: CONFIG.chunkSize,
     encoding: "binary", // 二进制读取
   });
 
-  // 4. 监听文件流数据，分块推送
+  // 监听文件流数据，分块推送
   let chunkIndex = 1;
   fileStream.on("data", (chunk) => {
     try {
@@ -68,17 +66,14 @@ async function streamPcmBysse(res) {
         })}\n\n`
       );
       chunkIndex++;
-      // console.log(`推送第${chunkIndex}块PCM数据，大小：${chunk.length}字节`)
     } catch (err) {
       console.error("推送数据失败：", err);
       fileStream.destroy(); // 出错关闭流
     }
   });
 
-  // 5. 监听流结束/错误
   fileStream.on("end", () => {
     console.log("PCM数据推送完成，总块数：", chunkIndex);
-    // 推送结束标识
     res.write(
       `data: ${JSON.stringify({ type: "end", index: chunkIndex })}\n\n`
     );
@@ -93,7 +88,6 @@ async function streamPcmBysse(res) {
     console.error("读取PCM文件失败：", err);
   });
 
-  // 6. 监听客户端断开连接，清理资源
   res.on("close", () => {
     fileStream.destroy();
     console.log("客户端断开连接，停止推送");

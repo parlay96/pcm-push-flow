@@ -24,28 +24,26 @@ const CONFIG = {
 // CONFIG.pushInterval = (CONFIG.chunkSize / ((CONFIG.bitDepth / 8) * CONFIG.channels) / CONFIG.sampleRate) * 1000
 
 async function streamPcmBysse(res) {
-  // 验证PCM文件存在
   if (!fs.existsSync(CONFIG.pcmFilePath)) {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end(`PCM文件不存在：${CONFIG.pcmFilePath}`);
     return;
   }
 
-  // 设置SSE响应头（核心）
   res.writeHead(200, {
-    "Content-Type": "text/event-stream", // SSE专属Content-Type
-    "Cache-Control": "no-cache", // 禁用缓存
-    Connection: "keep-alive", // 长连接
-    "Access-Control-Allow-Origin": "*", // 跨域支持（根据需求调整）
+    // SSE专属Content-Type
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
   });
 
-  // 创建文件读取流
   const fileStream = fs.createReadStream(CONFIG.pcmFilePath, {
-    highWaterMark: CONFIG.chunkSize, // 每次读取chunkSize字节
+    highWaterMark: CONFIG.chunkSize,
     encoding: "binary", // 二进制读取
   });
 
-  // 新增：任务计数器（跟踪待执行的setTimeout任务）
+  // 任务计数器（跟踪待执行的setTimeout任务）
   let pendingTasks = 0;
   // 监听文件流数据，分块推送
   let chunkIndex = 1;
@@ -86,7 +84,6 @@ async function streamPcmBysse(res) {
           checkAndSendEndSignal(res);
         }
       }, delayTime);
-      // console.log(`推送第${chunkIndex}块PCM数据，大小：${chunk.length}字节`)
     } catch (err) {
       console.error("推送数据失败：", err);
       pendingTasks--; // 出错也要减少计数器，避免死等
@@ -97,7 +94,6 @@ async function streamPcmBysse(res) {
   // 监听流结束（仅标记流已读完，不立即发结束标识）
   let streamEnded = false;
   fileStream.on("end", () => {
-    console.log("PCM文件流读取完成，待推送分块数：", chunkIndex);
     streamEnded = true; // 标记流已结束
     // 流结束后，检查是否所有延迟任务都完成
     checkAndSendEndSignal(res);
