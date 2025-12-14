@@ -35,7 +35,7 @@
     };
 
     // 合并变量
-    const CHUNK_BATCH_SIZE = 5; // 每5个块合并一次
+    const CHUNK_BATCH_SIZE = 10; // 每5个块合并一次
     let tempChunkCache = new Map(); // 临时缓存：key=块序号，value=PCM ArrayBuffer
     let mergedBufferArray = []; // 最终存储合并后缓冲区的数组
     let totalReceivedChunks = 1; // 已接收的总块数
@@ -311,7 +311,6 @@
         .map((item) => {
           return item[1];
         });
-
       // 1. 计算所有分块的总字节长度（和之前合并 ArrayBuffer 逻辑一致）
       const totalLength = sortedChunks.reduce(
         (sum, arr) => sum + arr.length,
@@ -327,13 +326,13 @@
         mergedArray.set(arr, offset); // 将当前分块拷贝到 offset 位置
         offset += arr.length; // 更新下一个分块的起始位置
       }
-      // console.log(mergedArray);
-      // console.log(`已合并${sortedChunks.length}个块`);
+      console.log(mergedArray);
+      console.log(`已合并${sortedChunks.length}个块`);
 
       // 4. 清空临时缓存，继续累计下一批块
       tempChunkCache.clear();
 
-      // 播放列队
+      // // 播放列队
       if (mergedArray) {
         if (!audioContextRef) {
           // 初始化音频上下文
@@ -351,7 +350,7 @@
       // 初始化SSE连接
       const url1 = "http://localhost:3000/api/pcm-stream";
       const url2 =
-        "https://ai-api-test.deepcity.cn/square/api.chat/sendVoiceOpen?msgId=845f43ea20b50488793601a40b37abd7&chatScene=zhanhui&sceneValue=89dbf3b3b91f4b698308272f0a7bddda";
+        "https://ai-api-test.deepcity.cn/square/api.chat/sendVoiceOpen?msgId=408448709e4b2bc948c02dce8e7161c9&chatScene=zhanhui&sceneValue=89dbf3b3b91f4b698308272f0a7bddda";
       eventSourceRef = new EventSource(url1);
       // 监听SSE消息
       eventSourceRef.onopen = () => {
@@ -367,7 +366,7 @@
         } catch (error) {
           // console.error("解析SSE消息时出错：", error);
         }
-        // console.log(data);
+        console.log(data);
         // 计算与上一次消息的时间差
         if (lastMessageTime !== null) {
           messageInterval = (currentTime - lastMessageTime) / 1000; // 转换为秒
@@ -379,7 +378,7 @@
         lastMessageTime = currentTime;
 
         // 处理结束标识
-        if (data.type === "end") {
+        if (data?.type === "end") {
           console.log(`推送完成，总块数：${data.total}`);
           console.log(tempChunkCache.size);
           // 处理传输结束后不满足5个的块的部分需要再次合并
@@ -389,16 +388,24 @@
           eventSourceRef.close();
           return;
         }
+        // 如果推送完了
+        if (data?.data?.status == "done" || e.data == "[DONE]") {
+          console.log(`推送完成，未合并块数：${tempChunkCache.size}`);
+          // 处理传输结束后不满足5个的块的部分需要再次合并
+          if (tempChunkCache.size) {
+            mergeUint8Arrays(tempChunkCache);
+          }
+        }
 
         // 处理错误
-        if (data.type === "error") {
+        if (data?.type === "error") {
           console.log(`错误：${data.message}`);
           eventSourceRef.close();
           return;
         }
 
         // Base64 解码为 Uint8Array（PCM 二进制）
-        const _base64 = data.data?.audio || data.data;
+        const _base64 = data?.data?.audio || data?.data;
 
         if (!_base64) return;
 
@@ -413,16 +420,14 @@
 
         // pcm 二进制数据
         const pcmUint8 = base64ToUint8Array(_base64);
-        // console.log(pcmUint8);
-        // 1. Base64转Uint8Array（MP3二进制）
-        //  const mp3Uint8 = base64ToUint8Array(_base64);
+        // console.log(pcmUint8, data);
         // 2. 存入临时缓存（去重+保序）
         if (!pcmUint8) return;
-        const chunkId = data.id;
+        const chunkId = data.id || data.data.index;
         if (!tempChunkCache.has(chunkId)) {
           tempChunkCache.set(chunkId, pcmUint8);
           totalReceivedChunks++;
-          //  console.log(`已接收第${chunkId}块，累计${totalReceivedChunks}块`);
+          console.log(`已接收第${chunkId}块，累计${totalReceivedChunks}块`);
         }
         // 3. 检查是否达到批量合并阈值（每5个块）
         if (tempChunkCache.size >= CHUNK_BATCH_SIZE) {
